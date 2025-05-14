@@ -1,34 +1,32 @@
 # R2T‑Net
 
-**R2T‑Net** is a PyTorch‑Lightning framework for learning a *single* 2 048‑dimensional “brain‑signature” vector from both resting‑state (rs‑fMRI) and task (t‑fMRI) data.  
-A Transformer encoder (Step 1) turns each 4‑D volume or ROI‑timeseries into that signature; a contrastive NT‑Xent loss (Step 2) makes signatures from the *same* person / different modalities attract, while pushing *different* people apart.
+**R2T‑Net** is a PyTorch‑Lightning framework that turns any 4‑D fMRI sample—resting‑state (rs‑fMRI) or task (t‑fMRI)—into a single **2 048‑dimensional brain‑signature**.  
+A Transformer encoder (Step 1) creates the signature; an NT‑Xent contrastive loss (Step 2) makes signatures from the *same* subject and *different* modalities attract, while pushing signatures from *different* subjects apart.  
+A small supervised head can then predict cognition or behaviour from the signature.
 
 ---
 
 ## 🌐 Motivation
 
-Most pipelines treat rs‑fMRI and t‑fMRI separately—often collapsing t‑fMRI into static contrast maps. That discards temporal information and limits subject‑specific modelling.  
-**R2T‑Net** jointly embeds both modalities so the signature is:
+Traditional pipelines handle rs‑fMRI and t‑fMRI separately, often compressing t‑fMRI into static contrast maps—losing temporal dynamics and personalization.  
+**R2T‑Net** instead:
 
-* **Modality‑invariant** (rest ⇄ task)  
-* **Person‑specific** (positive pairs = same subject)  
-* **Time‑stable** (good test–retest reliability)  
-* **Predictive** for cognition / behaviour from rs‑fMRI alone  
+* Learns a **modality‑invariant** embedding (rest ⇄ task).  
+* Produces **person‑specific** vectors (positive pairs = same subject).  
+* Shows good **test–retest stability**.  
+* Lets you predict behaviour from *resting scans only*, cutting scan time.
 
 ---
 
 ## 🧱 Backbone Flexibility
 
-Any encoder that outputs a `[B, embed_dim]` feature can plug in by editing  
-`module/models/load_model.py`.
+Edit one line in `module/models/load_model.py` to plug in any encoder that outputs a `[B, embed_dim]` feature:
 
-| Category           | Examples you can register |
-|--------------------|---------------------------|
-| **Transformer‑4D** | `swin4d_ver7` (default), `vit`, `transformer2d`, TimeSformer‑style |
-| **3‑D CNN**        | `resnet3d`, `densenet3d`, `r3d_18`, `unet3d` |
-| **Hybrid**         | CNN + GRU, Perceiver IO, Temporal‑U‑Net |
-
-(The repo ships with Swin‑4D and a fallback to any ViT from `timm`.)
+| Category           | Examples |
+|--------------------|----------|
+| Transformer‑4D     | `swin4d_ver7` (default) ·  ViT · TimeSformer |
+| 3‑D CNN            | 3‑D ResNet, 3‑D DenseNet, UNet‑3D |
+| Hybrid             | CNN + GRU, Perceiver IO, Temporal‑U‑Net |
 
 ---
 
@@ -36,11 +34,11 @@ Any encoder that outputs a `[B, embed_dim]` feature can plug in by editing
 
 | Feature | Details |
 |---------|---------|
-| **Flexible input** | Raw 4‑D volumes `[C,H,W,D,T]`, grayordinates `[91 282,T]`, or parcellated ROI `[V,T]` |
-| **Transformer or CNN** | Swap backbone via `--model`. External 3‑D patch‑embedding provided for ViT‑style nets. |
-| **Contrastive + Supervised** | Add `--contrastive` for NT‑Xent; downstream regression / classification head is always present. |
-| **Cosine‑Warmup scheduler** | `--use_scheduler` activates `CosineAnnealingWarmUpRestarts`. |
-| **Metrics** | Pearson / MSE / MAE for regression, Balanced‑Acc / AUROC for classification (Lightning’s `torchmetrics`). |
+| **Input‑agnostic** | Raw 4‑D volumes `[C,H,W,D,T]`, grayordinates `[91 282,T]`, or ROI series `[V,T]` |
+| **Always contrastive** | NT‑Xent runs in every mode; you choose to freeze or unfreeze the prediction head |
+| **Cosine‑warmup scheduler** | Enable with `--use_scheduler` |
+| **Metrics out‑of‑the‑box** | Pearson / MSE / MAE (regression), Balanced‑Acc / AUROC (classification) |
+| **Runs on a single GPU** | Batch accumulation + mixed precision available |
 
 ---
 
@@ -49,11 +47,11 @@ Any encoder that outputs a `[B, embed_dim]` feature can plug in by editing
 ```
 
 R2TNet/
-├── train.py            # training / validation / test
-├── inference.py        # batch inference on rs‑fMRI
+├── train.py                # train / validate / test
+├── inference.py            # batch inference on rs‑fMRI
 │
 ├── module/
-│   ├── r2tnet.py       # LightningModule (encoder + heads + loss)
+│   ├── r2tnet.py           # LightningModule (encoder + heads + losses)
 │   ├── models/
 │   │   ├── load\_model.py
 │   │   ├── swin4d\_transformer\_ver7.py
@@ -64,7 +62,7 @@ R2TNet/
 │       ├── patch\_embedding.py
 │       └── lr\_scheduler.py
 │
-└── logs/               # created automatically (checkpoints + TensorBoard)
+└── logs/                   # auto‑generated (TensorBoard & checkpoints)
 
 ````
 
@@ -78,37 +76,49 @@ R2TNet/
 pip install pytorch-lightning torch timm einops torchmetrics scikit-learn
 ````
 
-### 2 · Prepare data
+### 2 · Prepare your data
 
 ```
 data/S1200/
 └── img/100307/frame_0.pt  frame_1.pt ...
 ```
 
-Each `frame_*.pt` is a tensor `[C,H,W,D]` for one TR.
+Each `frame_*.pt` is `[C,H,W,D]` for one TR.
 
-### 3 · Supervised training
+### 3 · Training Paradigms
+
+| Mode                         | Contrastive | Supervised Head | Command flag                  |
+| ---------------------------- | ----------- | --------------- | ----------------------------- |
+| **Pre‑training**             | ✅           | ❌ (frozen)      | `--contrastive --pretraining` |
+| **Full fine‑tune** (default) | ✅           | ✅               | `--contrastive`               |
+
+> If you omit `--contrastive`, the script still runs but you lose the main advantage of R2T‑Net.
+
+#### A. Self‑supervised pre‑training
 
 ```bash
 python train.py \
   --data_dir data/S1200 \
   --dataset_type rest \
-  --batch_size 4 \
+  --contrastive --pretraining \
   --model swin4d_ver7 \
-  --max_epochs 50
+  --batch_size 8 --max_epochs 50 --use_scheduler
 ```
 
-### 4 · Contrastive pre‑training
+#### B. Fine‑tune with labels (keeps contrastive loss)
 
 ```bash
 python train.py \
   --data_dir data/S1200 \
   --dataset_type rest \
-  --contrastive --use_scheduler \
-  --model swin4d_ver7
+  --contrastive \
+  --load_model logs/pretrain.ckpt \
+  --downstream_task_type regression \
+  --model swin4d_ver7 \
+  --batch_size 4 --max_epochs 30 --use_scheduler
 ```
 
-### 5 · Inference (rs‑fMRI → cognitive score)
+### 4 · Inference (rs‑fMRI → score)
 
 ```bash
 python inference.py \
@@ -121,12 +131,6 @@ python inference.py \
 
 ## 🧠 Applications
 
-* Predict fluid intelligence, memory, personality from rs‑fMRI
-* Replace long multi‑task scans with one short resting scan
-* Transfer‑learning to clinical cohorts (e.g., ADNI, ABCD)
-
----
-
-## 📜 License
-
-Released under the MIT License – free for research and commercial use.
+* Predict fluid intelligence, memory, personality from *resting scans only*
+* Shorten scan protocols in population studies
+* Transfer‑learn to clinical cohorts (ADNI, ABCD, UK Biobank)
