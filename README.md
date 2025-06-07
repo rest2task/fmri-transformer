@@ -114,7 +114,6 @@ data/S1200/
 | ------------------- | ------- | ---------- | -------------------------------------------------------- |
 | **Self-supervised** | ✅       | ❌ (frozen) | `--contrastive --pretraining --freeze_head`              |
 | **Full fine-tune**  | ✅       | ✅          | `--contrastive` *(default)*                              |
-| **Linear probe**    | ❌       | ✅ (frozen) | `--freeze_encoder --downstream_task_type classification` |
 
 > ⚠️ Omitting `--contrastive` disables NT-Xent loss (core to R2T‑Net).
 
@@ -189,13 +188,6 @@ Output: CSV file with columns `subject_id,prediction`.
 | **Loss = NaN**      | Check `--total_steps` ≫ `--warmup_pct`         |
 | **AUROC = 0.5**     | Check for constant or missing labels           |
 | **Slow dataloader** | Increase `--num_workers`; pre-convert to `.pt` |
-
-
-### 8 · Next Steps
-
-* ✅ Try other encoders: `--model resnet3d18`, `vit`, `cnn_gru`, `temporal_unet`
-* ✅ Multi-GPU: `--accelerator gpu --devices 8 --strategy ddp`
-* ✅ Export to ONNX: `python export_onnx.py --ckpt logs/last.ckpt`
 
 ---
 
