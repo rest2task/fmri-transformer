@@ -53,14 +53,14 @@ R2TNet/
 ├── module/
 │   ├── r2tnet.py           # LightningModule (encoder + heads + losses)
 │   ├── models/
-│   │   ├── load\_model.py
-│   │   ├── swin4d\_transformer\_ver7.py
-│   │   └── swin\_transformer.py
+│   │   ├── load_model.py
+│   │   ├── swin4d_transformer_ver7.py
+│   │   └── swin_transformer.py
 │   └── utils/
-│       ├── data\_module.py
+│       ├── data_module.py
 │       ├── datasets.py
-│       ├── patch\_embedding.py
-│       └── lr\_scheduler.py
+│       ├── patch_embedding.py
+│       └── lr_scheduler.py
 │
 └── logs/                   # auto‑generated (TensorBoard & checkpoints)
 
@@ -68,64 +68,134 @@ R2TNet/
 
 ---
 
+
 ## 🚀 Quick Start
 
-### 1 · Install
+Train and evaluate on 4D fMRI, ROI series, or grayordinates — all from one CLI.
+
+
+### 1 · Install
 
 ```bash
-pip install pytorch-lightning torch timm einops torchmetrics scikit-learn
-````
+# PyTorch 2.x with CUDA 11.8
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
-### 2 · Prepare your data
+# Core dependencies
+pip install pytorch-lightning timm einops torchmetrics scikit-learn
+
+# Optional extras
+pip install monai pandas matplotlib
+```
+
+
+### 2 · Prepare your data
 
 ```
 data/S1200/
-└── img/100307/frame_0.pt  frame_1.pt ...
+├── img/
+│   ├── 100307/
+│   │   ├── frame_0.pt
+│   │   ├── frame_1.pt
+│   │   └── ...
+│   └── 103414/
+└── meta/
+    ├── subject_dict.json        # {"100307": [0, 83.2], ...}
+    └── splits.json              # {"train": [...], "val": [...], "test": [...]}
 ```
 
-Each `frame_*.pt` is `[C,H,W,D]` for one TR.
+* Each `frame_*.pt` is a tensor shaped `[C, H, W, D]` (for 4D fMRI).
+* ROIs or grayordinates should be saved as `[V]` tensors per frame.
+* Optional: `voxel_mean.pt` and `voxel_std.pt` for normalization.
 
-### 3 · Training Paradigms
 
-| Mode                         | Contrastive | Supervised Head | Command flag                  |
-| ---------------------------- | ----------- | --------------- | ----------------------------- |
-| **Pre‑training**             | ✅           | ❌ (frozen)      | `--contrastive --pretraining` |
-| **Full fine‑tune** (default) | ✅           | ✅               | `--contrastive`               |
+### 3 · Training Paradigms
 
-> If you omit `--contrastive`, the script still runs but you lose the main advantage of R2T‑Net.
+| Mode                | NT-Xent | Supervised | CLI Flags                                                |
+| ------------------- | ------- | ---------- | -------------------------------------------------------- |
+| **Self-supervised** | ✅       | ❌ (frozen) | `--contrastive --pretraining --freeze_head`              |
+| **Full fine-tune**  | ✅       | ✅          | `--contrastive` *(default)*                              |
+| **Linear probe**    | ❌       | ✅ (frozen) | `--freeze_encoder --downstream_task_type classification` |
 
-#### A. Self‑supervised pre‑training
+> ⚠️ Omitting `--contrastive` disables NT-Xent loss (core to R2T‑Net).
+
+
+### 4 · Example Commands
+
+#### A. Self-supervised Pre-training
 
 ```bash
 python train.py \
   --data_dir data/S1200 \
   --dataset_type rest \
-  --contrastive --pretraining \
+  --contrastive --pretraining --freeze_head \
   --model swin4d_ver7 \
-  --batch_size 8 --max_epochs 50 --use_scheduler
+  --batch_size 8 --max_epochs 50 \
+  --use_scheduler --total_steps 20000
 ```
 
-#### B. Fine‑tune with labels (keeps contrastive loss)
+#### B. Fine-tune with Labels (Regression)
 
 ```bash
 python train.py \
   --data_dir data/S1200 \
   --dataset_type rest \
   --contrastive \
-  --load_model logs/pretrain.ckpt \
+  --load_model logs/last.ckpt \
   --downstream_task_type regression \
+  --label_scaling_method standardization \
   --model swin4d_ver7 \
   --batch_size 4 --max_epochs 30 --use_scheduler
 ```
 
-### 4 · Inference (rs‑fMRI → score)
+#### C. Evaluate/Test Only
+
+```bash
+python train.py \
+  --test_only --test_ckpt logs/epoch02-valid_loss=0.2100.ckpt \
+  --data_dir data/S1200
+```
+
+
+### 5 · Inference (e.g., rs-fMRI → prediction)
 
 ```bash
 python inference.py \
   --ckpt logs/epoch03-valid_loss=0.2100.ckpt \
-  --input_dir data/S1200/img/ \
+  --input_dir data/S1200/img \
+  --input_kind vol \
   --output rs_predictions.csv
 ```
+
+Output: CSV file with columns `subject_id,prediction`.
+
+
+### 6 · Recommended Flags
+
+| Flag                              | Purpose                                        |
+| --------------------------------- | ---------------------------------------------- |
+| `--precision 16`                  | Mixed precision — saves memory                 |
+| `--accumulate_grad_batches 2`     | Gradient accumulation (for small GPUs)         |
+| `--resume_from_checkpoint ...`    | Resume training from last/best                 |
+| `--balanced_sampling`             | Ensures equal subject exposure per epoch       |
+| `--num_rois 360 --input_kind roi` | Switch to ROI-based input (instead of volumes) |
+| `--grayordinates`                 | Use 91,282-dim grayordinate inputs             |
+
+
+### 7 · Troubleshooting
+
+| Symptom             | Likely Fix                                     |
+| ------------------- | ---------------------------------------------- |
+| **CUDA OOM**        | Reduce `--batch_size`, or add `--precision 16` |
+| **Loss = NaN**      | Check `--total_steps` ≫ `--warmup_pct`         |
+| **AUROC = 0.5**     | Check for constant or missing labels           |
+| **Slow dataloader** | Increase `--num_workers`; pre-convert to `.pt` |
+
+
+### 8 · Next Steps
+
+* ✅ Try other encoders: `--model resnet3d18`, `vit`, `cnn_gru`, `temporal_unet`
+* ✅ Multi-GPU: `--accelerator gpu --devices 8 --strategy ddp`
+* ✅ Export to ONNX: `python export_onnx.py --ckpt logs/last.ckpt`
 
 ---
 
