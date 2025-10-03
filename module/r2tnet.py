@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import random
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
-from typing import Dict, Tuple
+from typing import Dict, Iterable, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -134,6 +135,72 @@ class R2TNet(pl.LightningModule):
         return signature, prediction
 
     # ------------------------------------------------------------------
+    # data augmentation helpers
+    # ------------------------------------------------------------------
+    def _temporal_crop(self, x: Tensor) -> Tensor:
+        """Randomly crop 80–100% of the time dimension and zero-pad back."""
+
+        if not self.training or self.hparams.temporal_crop_min_ratio >= 1.0:
+            return x
+
+        seq_len = x.size(-1)
+        min_len = max(int(seq_len * self.hparams.temporal_crop_min_ratio), 1)
+        if min_len >= seq_len:
+            return x
+
+        crop_len = random.randint(min_len, seq_len)
+        start = random.randint(0, seq_len - crop_len)
+        cropped = x[..., start : start + crop_len]
+        if crop_len == seq_len:
+            return cropped
+
+        pad = seq_len - crop_len
+        return F.pad(cropped, (0, pad))
+
+    def _gaussian_noise(self, x: Tensor) -> Tensor:
+        """Inject Gaussian noise on a random subset of voxels/tokens."""
+
+        if not self.training or self.hparams.gaussian_noise_std <= 0:
+            return x
+
+        if self.hparams.gaussian_noise_p <= 0:
+            return x
+
+        noise = torch.randn_like(x) * self.hparams.gaussian_noise_std
+        mask_shape = x.shape[:-1]
+        noise_mask = torch.rand(mask_shape, device=x.device) < self.hparams.gaussian_noise_p
+        noise_mask = noise_mask.unsqueeze(-1).to(x.dtype)
+        return x + noise * noise_mask
+
+    def _augment(self, x: Tensor) -> Tensor:
+        x = self._temporal_crop(x)
+        x = self._gaussian_noise(x)
+        return x
+
+    def _maybe_modality_dropout(
+        self,
+        rest_x: Tensor,
+        rest_mod: Tensor,
+        task_x: Tensor,
+        task_mod: Tensor,
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Randomly replace one modality to encourage invariance."""
+
+        if not self.training:
+            return rest_x, rest_mod, task_x, task_mod
+
+        if random.random() >= self.hparams.modality_dropout_prob:
+            return rest_x, rest_mod, task_x, task_mod
+
+        if random.random() < 0.5:
+            task_x = rest_x.clone()
+            task_mod = rest_mod.clone()
+        else:
+            rest_x = task_x.clone()
+            rest_mod = task_mod.clone()
+        return rest_x, rest_mod, task_x, task_mod
+
+    # ------------------------------------------------------------------
     # losses
     # ------------------------------------------------------------------
     def _contrastive_loss(self, rest: Tensor, task: Tensor) -> Tensor:
@@ -185,6 +252,9 @@ class R2TNet(pl.LightningModule):
 
     def training_step(self, batch, _):
         rest_x, rest_mod, task_x, task_mod = self._extract_views(batch)
+        rest_x = self._augment(rest_x)
+        task_x = self._augment(task_x)
+        rest_x, rest_mod, task_x, task_mod = self._maybe_modality_dropout(rest_x, rest_mod, task_x, task_mod)
         rest_sig = self.encode(rest_x, rest_mod)
         task_sig = self.encode(task_x, task_mod)
 
@@ -250,10 +320,26 @@ class R2TNet(pl.LightningModule):
     # optimisers / schedulers
     # ------------------------------------------------------------------
     def configure_optimizers(self):
+        encoder_params: Iterable[Tensor] = []
+        head_params: Iterable[Tensor] = []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if name.startswith("pred_head"):
+                head_params.append(param)
+            else:
+                encoder_params.append(param)
+
+        encoder_params = list(encoder_params)
+        head_params = list(head_params)
+
+        param_groups = [{"params": encoder_params, "weight_decay": 0.0}]
+        if head_params:
+            param_groups.append({"params": head_params, "weight_decay": self.hparams.weight_decay})
+
         opt = torch.optim.AdamW(
-            self.parameters(),
+            param_groups,
             lr=self.hparams.learning_rate,
-            weight_decay=self.hparams.weight_decay,
         )
         if not self.hparams.use_scheduler:
             return opt
@@ -269,6 +355,9 @@ class R2TNet(pl.LightningModule):
             gamma=self.hparams.gamma,
         )
         return [opt], [{"scheduler": sched, "interval": "step"}]
+
+    def configure_gradient_clipping(self, optimizer, optimizer_idx, gradient_clip_val, gradient_clip_algorithm):
+        torch.nn.utils.clip_grad_norm_(self.parameters(), self.hparams.grad_clip_norm)
 
     # ------------------------------------------------------------------
     # CLI
@@ -303,6 +392,11 @@ class R2TNet(pl.LightningModule):
         train.add_argument("--pretraining", action="store_true")
         train.add_argument("--lambda_contrast", type=float, default=0.5)
         train.add_argument("--temperature", type=float, default=0.07)
+        train.add_argument("--temporal_crop_min_ratio", type=float, default=0.8)
+        train.add_argument("--gaussian_noise_std", type=float, default=0.01)
+        train.add_argument("--gaussian_noise_p", type=float, default=0.1)
+        train.add_argument("--modality_dropout_prob", type=float, default=0.2)
+        train.add_argument("--grad_clip_norm", type=float, default=1.0)
 
         downstream = p.add_argument_group("Downstream")
         downstream.add_argument(
