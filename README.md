@@ -31,7 +31,7 @@ Edit one line in `module/models/load_model.py` to plug in any encoder that outpu
 
 ---
 
-## 🔧 Key Features
+## Key Features
 
 | Feature | Details |
 |---------|---------|
@@ -44,7 +44,7 @@ Edit one line in `module/models/load_model.py` to plug in any encoder that outpu
 
 ---
 
-## 📁 Directory Layout
+## Directory Layout
 
 ```
 
