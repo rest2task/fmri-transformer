@@ -1,144 +1,156 @@
-from monai.transforms import LoadImage
-import torch
-import os
+"""Utility script to convert HCP task-fMRI NIfTI volumes into fp16 tensors."""
+
+from __future__ import annotations
+
+import argparse
 import time
-from multiprocessing import Process, Queue
-import nibabel as nib
-import glob
+from pathlib import Path
+from typing import Iterable
 
-import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
+import torch
+from monai.transforms import LoadImage
 
-def read_data(subj_name, load_root, save_root, scaling_method='minmax', fill_zeroback=True):
-    print(f'### Processing: {subj_name}, scaling_method={scaling_method}', flush=True)
-    path = os.path.join(load_root, subj_name, 'rfMRI_REST1_LR_hp2000_clean.nii.gz')
+
+def process_subject(
+    subj_name: str,
+    load_root: Path,
+    save_img_root: Path,
+    nifti_name: str,
+    scaling_method: str = "minmax",
+    fill_zeroback: bool = True,
+) -> bool:
+    src_path = load_root / subj_name / nifti_name
+    if not src_path.exists():
+        print(f"[skip] {subj_name}: missing {nifti_name}")
+        return False
+
+    print(f"### Processing: {subj_name}, scaling_method={scaling_method}", flush=True)
+
     try:
-        # load each nifti file
-        data, meta = LoadImage()(path)
-    except:
-        print(f'{subj_name} read data fails.')
-        return None
-    
-    print(subj_name, data.shape, end='')
-    
-    #change this line according to your file names
-    save_dir = os.path.join(save_root, subj_name)
-    isExist = os.path.exists(save_dir)
-    if not isExist:
-        os.makedirs(save_dir)
-    
-    # change this line according to your dataset
-    data = data[:, 14:-7, :, :]
-    # width, height, depth, time
-    # Inspect the fMRI file first using your visualization tool. 
-    # Limit the ranges of width, height, and depth to be under 96. Crop the background, not the brain regions. 
-    # Each dimension of fMRI registered to MNI space (2mm) is expected to be around 100.
-    # You can do this when you load each volume at the Dataset class, including padding backgrounds to fill dimensions under 96.
+        data, _ = LoadImage()(str(src_path))
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(f"[error] {subj_name}: failed to load ({exc})")
+        return False
 
-    background = (data==0)
-    
-    if scaling_method == 'z-norm':
+    # Dataset-specific crop (adjust for your acquisition)
+    data = data[:, 14:-7, :, :]
+
+    background = data == 0
+    if background.all():
+        print(f"[warn] {subj_name}: volume appears empty after crop; skipping")
+        return False
+
+    if scaling_method == "z-norm":
         global_mean = data[~background].mean()
         global_std = data[~background].std()
-        data_temp = (data - global_mean) / global_std
-    elif scaling_method == 'minmax':
-        data_temp = (data - data[~background].min()) / (data[~background].max() - data[~background].min())
-    
-
-    data_global = torch.empty(data.shape)
-    data_global[background] = data_temp[~background].min() if not fill_zeroback else 0 
-    # data_temp[~background].min() is expected to be 0 for scaling_method == 'minmax', and minimum z-value for scaling_method == 'z-norm'
-    data_global[~background] = data_temp[~background]
-
-    # save volumes one-by-one in fp16 format.
-    data_global = data_global.type(torch.float16)
-    print(' ->', data_global.shape)
-    data_global_split = torch.split(data_global, 1, 3)
-    for i, TR in enumerate(data_global_split):
-        torch.save(TR.clone(), os.path.join(save_dir, f"frame_{i}.pt"))
-
-
-def read_data_v1(path, save_dir):
-    print("processing: " + path, flush=True)
-    fmri_path = os.path.join(path, 'rfMRI_REST1_LR_hp2000_clean.nii.gz') 
-    data, metadata = LoadImage()(fmri_path) #torch.Tensor(nib.load(path).get_fdata()) #LoadImage()(path)
-    
-    #change this line according to your file names
-    os.makedirs(save_dir, exist_ok=True)
-    
-    # change this line according to your dataset
-    data = data[7:85, 7:103, 0:84, :]
-    # width, height, depth, time
-    # Inspect the fMRI file first using your visualization tool. 
-    # Limit the ranges of width, height, and depth to be under 96. Crop the background, not the brain regions. 
-    # Each dimension of fMRI registered to MNI space (2mm) is expected to be around 100.
-    # You can do this when you load each volume at the Dataset class, including padding backgrounds to fill dimensions under 96.
-   
-    background = (data <=0) # change this because filtered UKB data has minus values
-    
-    valid_voxels = data[~background].numel()
-    global_mean = data[~background].mean()
-    global_std = data[~background].std()
-    global_max = data[~background].max()
-    # global min should be zero
-
-    data[background] = 0
-
-    # save volumes one-by-one in fp16 format.
-    data_global = data.type(torch.float16)
-    data_global_split = torch.split(data_global, 1, 3)
-    for i, TR in enumerate(data_global_split):
-        torch.save(TR.clone(), os.path.join(save_dir, "frame_" + str(i) + ".pt"))
-    
-    # save global stat of fMRI volumes
-    checkpoint = {
-    'valid_voxels': valid_voxels,
-    'global_mean': global_mean,
-    'global_std': global_std,
-    'global_max': global_max
-    }
-    torch.save(checkpoint, os.path.join(save_dir,"global_stats.pt"))
-
-if __name__=='__main__':
-    start_time = time.time()
-
-    load_root = './HCP_1200/' # This folder should have fMRI files in nifti format with subject names.
-    save_root = './HCP_SwiFT/'
-    scaling_method = 'minmax' # choose either 'z-norm'(default) or 'minmax'.
-
-    # make result folders
-    filenames = os.listdir(load_root)
-    os.makedirs(os.path.join(save_root, 'img'), exist_ok = True)
-    os.makedirs(os.path.join(save_root, 'metadata'), exist_ok = True) # locate your metadata file at this folder 
-    save_img_root = os.path.join(save_root, 'img')
-    
-    finished_samples = os.listdir(save_root)
-    queue = Queue() 
-    count = 0
-    for filename in sorted(filenames):
-        subj_name = filename
-        # extract subject name from nifti file. [:-7] rules out '.nii.gz'
-        # we recommend you use subj_name that aligns with the subject key in a metadata file.
-
-        expected_seq_length = 405 # Specify the expected sequence length of fMRI for the case your preprocessing stopped unexpectedly and you try to resume the preprocessing.
-        
-        # change the line below according to your folder structure
-        curr_len = len(glob.glob(os.path.join(save_img_root, subj_name, '*.pt')))
-        if curr_len < expected_seq_length: # preprocess if the subject folder does not exist, or the number of pth files is lower than expected sequence length. 
-            try:
-                count += 1
-                '''
-                p = Process(target=read_data, args=(subj_name, load_root, save_img_root, scaling_method))
-                p.start()
-                if count % 1 == 0:
-                    p.join()
-                '''
-                read_data(subj_name, load_root, save_img_root, scaling_method)
-            except Exception:
-                print('Encountered problem with ' + filename)
-                print(Exception)
+        scaled = (data - global_mean) / global_std
+        data_global = torch.empty_like(data)
+        fill_value = scaled[~background].min() if not fill_zeroback else 0
+        data_global[background] = fill_value
+        data_global[~background] = scaled[~background]
+    else:
+        non_zero = data[~background]
+        if non_zero.numel() == 0:
+            print(f"[warn] {subj_name}: no foreground voxels detected; skipping")
+            return False
+        denom = non_zero.max() - non_zero.min()
+        if denom.abs() < 1e-8:
+            scaled_values = torch.zeros_like(non_zero)
         else:
-            print(f'Skip: {subj_name}, len={curr_len}')
+            scaled_values = (non_zero - non_zero.min()) / denom
+        data_global = torch.empty_like(data)
+        data_global[background] = 0 if fill_zeroback else non_zero.min()
+        data_global[~background] = scaled_values
 
-    end_time = time.time()
-    print('\nTotal', round((end_time - start_time) / 60), 'minutes elapsed.')    
+    save_dir = save_img_root / subj_name
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    data_global = data_global.to(torch.float16)
+    for idx, tr_volume in enumerate(torch.split(data_global, 1, dim=3)):
+        torch.save(tr_volume.clone(), save_dir / f"frame_{idx}.pt")
+
+    print(f"    -> saved {idx + 1} frames to {save_dir}")
+    return True
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Preprocess HCP task runs into tensors")
+    parser.add_argument("--load-root", type=Path, required=True, help="Folder containing subject sub-directories with NIfTI files")
+    parser.add_argument("--save-root", type=Path, required=True, help="Destination folder for fp16 tensors")
+    parser.add_argument(
+        "--nifti-name",
+        type=str,
+        default="tfMRI_WM_LR.nii.gz",
+        help="Name of the task NIfTI file inside each subject folder",
+    )
+    parser.add_argument(
+        "--scaling-method",
+        choices=["minmax", "z-norm"],
+        default="minmax",
+        help="Intensity normalisation strategy",
+    )
+    parser.add_argument(
+        "--expected-length",
+        type=int,
+        default=405,
+        help="Number of TRs expected per subject; used to skip already processed folders",
+    )
+    parser.add_argument(
+        "--fill-zero-background",
+        dest="fill_zero_background",
+        action="store_true",
+        help="Fill background voxels with zero after scaling",
+    )
+    parser.add_argument(
+        "--keep-min-background",
+        dest="fill_zero_background",
+        action="store_false",
+        help="Reuse the minimum foreground value instead of zero for background voxels",
+    )
+    parser.set_defaults(fill_zero_background=True)
+    return parser.parse_args()
+
+
+def iter_subjects(load_root: Path) -> Iterable[str]:
+    for path in sorted(load_root.iterdir()):
+        if path.is_dir():
+            yield path.name
+
+
+def main() -> None:
+    args = parse_args()
+    load_root = args.load_root.expanduser().resolve()
+    save_root = args.save_root.expanduser().resolve()
+
+    img_root = save_root / "img"
+    meta_root = save_root / "meta"
+    img_root.mkdir(parents=True, exist_ok=True)
+    meta_root.mkdir(parents=True, exist_ok=True)
+
+    start_time = time.time()
+    processed = 0
+
+    for subj_name in iter_subjects(load_root):
+        dest_dir = img_root / subj_name
+        existing = len(list(dest_dir.glob("frame_*.pt")))
+        if existing >= args.expected_length:
+            print(f"[skip] {subj_name}: found {existing} frames (>= {args.expected_length})")
+            continue
+
+        ok = process_subject(
+            subj_name=subj_name,
+            load_root=load_root,
+            save_img_root=img_root,
+            nifti_name=args.nifti_name,
+            scaling_method=args.scaling_method,
+            fill_zeroback=args.fill_zero_background,
+        )
+        if ok:
+            processed += 1
+
+    minutes = (time.time() - start_time) / 60
+    print(f"Finished preprocessing {processed} subjects in {minutes:.1f} min")
+
+
+if __name__ == "__main__":
+    main()

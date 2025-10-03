@@ -37,6 +37,7 @@ Edit one line in `module/models/load_model.py` to plug in any encoder that outpu
 | **Input‑agnostic** | Raw 4‑D volumes `[C,H,W,D,T]`, grayordinates `[91 282,T]`, or ROI series `[V,T]` |
 | **Always contrastive** | NT‑Xent runs in every mode; you choose to freeze or unfreeze the prediction head |
 | **Cosine‑warmup scheduler** | Enable with `--use_scheduler` |
+| **Built-in regularisation** | Temporal crops, Gaussian noise, modality dropout, and gradient clipping (\|g\|=1) |
 | **Metrics out‑of‑the‑box** | Pearson / MSE / MAE (regression), Balanced‑Acc / AUROC (classification) |
 | **Runs on a single GPU** | Batch accumulation + mixed precision available |
 
@@ -108,6 +109,33 @@ data/S1200/
 * Optional: `voxel_mean.pt` and `voxel_std.pt` for normalization.
 
 
+#### 2a · Convert NIfTI volumes (HCP example)
+
+The repository ships two helper scripts that dump each fMRI time point into the layout above. Both scripts normalise the data, crop empty borders (adjust inside the script if your acquisition differs), and skip subjects that are already processed.
+
+```bash
+# Resting-state window (default file: rfMRI_REST1_LR_hp2000_clean.nii.gz)
+python preprocessing_HCP_Rest.py \
+  --load-root /path/to/HCP_1200 \
+  --save-root data/S1200 \
+  --expected-length 1200
+
+# Task run (default file: tfMRI_WM_LR.nii.gz)
+python preprocessing_HCP_Task.py \
+  --load-root /path/to/HCP_1200 \
+  --save-root data/S1200 \
+  --expected-length 405
+```
+
+Key flags:
+
+* `--nifti-name` — override the file name inside each subject folder (e.g. use `tfMRI_REL_LR.nii.gz` for relational reasoning).
+* `--scaling-method {minmax,z-norm}` — choose intensity scaling.
+* `--keep-min-background` — fill background voxels with the minimum foreground value instead of zero.
+
+The scripts populate `data/S1200/img/<subject>/frame_*.pt` in fp16 format and create an empty `data/S1200/meta/` directory for metadata files (`subject_dict.json`, `splits.json`).
+
+
 ### 3 · Training Paradigms
 
 | Mode                | NT-Xent | Supervised | CLI Flags                                                |
@@ -143,7 +171,9 @@ python train.py \
   --downstream_task_type regression \
   --label_scaling_method standardization \
   --model swin4d_ver7 \
-  --batch_size 4 --max_epochs 30 --use_scheduler
+  --batch_size 4 --max_epochs 30 --use_scheduler \
+  --temporal_crop_min_ratio 0.8 --gaussian_noise_std 0.01 \
+  --gaussian_noise_p 0.1 --modality_dropout_prob 0.2
 ```
 
 #### C. Evaluate/Test Only
@@ -176,6 +206,9 @@ Output: CSV file with columns `subject_id,prediction`.
 | `--accumulate_grad_batches 2`     | Gradient accumulation (for small GPUs)         |
 | `--resume_from_checkpoint ...`    | Resume training from last/best                 |
 | `--balanced_sampling`             | Ensures equal subject exposure per epoch       |
+| `--temporal_crop_min_ratio 0.9`   | Tighten temporal cropping during training      |
+| `--gaussian_noise_std 0.0`        | Disable stochastic noise injection             |
+| `--modality_dropout_prob 0.0`     | Train without modality dropout                 |
 | `--num_rois 360 --input_kind roi` | Switch to ROI-based input (instead of volumes) |
 | `--grayordinates`                 | Use 91,282-dim grayordinate inputs             |
 
