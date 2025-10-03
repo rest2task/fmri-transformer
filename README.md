@@ -1,6 +1,7 @@
 # R2T‑Net
 
-**R2T‑Net** is a PyTorch‑Lightning framework that turns any 4‑D fMRI sample—resting‑state (rs‑fMRI) or task (t‑fMRI)—into a single **1024‑dimensional brain‑signature**.  
+**R2T‑Net** is a PyTorch‑Lightning framework that turns paired 4‑D fMRI samples—resting‑state (rs‑fMRI) and task (t‑fMRI)—into a unified **2048‑dimensional dynamic activity signature** by concatenating their respective 1,024-D encoder outputs.
+A companion script, `extract.py`, exports these signatures directly from a checkpoint.
 A Transformer encoder (Step 1) creates the signature; an NT‑Xent contrastive loss (Step 2) makes signatures from the *same* subject and *different* modalities attract, while pushing signatures from *different* subjects apart.  
 A small supervised head can then predict cognition or behaviour from the signature.
 
