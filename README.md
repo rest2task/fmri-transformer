@@ -1,13 +1,13 @@
 # R2T‑Net
 
-**R2T‑Net** is a PyTorch‑Lightning framework that turns paired 4‑D fMRI samples—resting‑state (rs‑fMRI) and task (t‑fMRI)—into a unified **2048‑dimensional dynamic activity signature** by concatenating their respective 1,024-D encoder outputs.
+**R2T‑Net** is a PyTorch‑Lightning framework that turns paired 4‑D fMRI samples—resting‑state (rs‑fMRI) and task (t‑fMRI)—into a unified **2048‑dimensional dynamic activity signature** by concatenating their respective 2,048-D encoder outputs.
 A companion script, `extract.py`, exports these signatures directly from a checkpoint.
 A Transformer encoder (Step 1) creates the signature; an NT‑Xent contrastive loss (Step 2) makes signatures from the *same* subject and *different* modalities attract, while pushing signatures from *different* subjects apart.  
 A small supervised head can then predict cognition or behaviour from the signature.
 
 ---
 
-## 🌐 Motivation
+## Motivation
 
 Traditional pipelines handle rs‑fMRI and t‑fMRI separately, often compressing t‑fMRI into static contrast maps—losing temporal dynamics and personalization.  
 **R2T‑Net** instead:
@@ -19,7 +19,7 @@ Traditional pipelines handle rs‑fMRI and t‑fMRI separately, often compressin
 
 ---
 
-## 🧱 Backbone Flexibility
+## Backbone Flexibility
 
 Edit one line in `module/models/load_model.py` to plug in any encoder that outputs a `[B, embed_dim]` feature:
 
@@ -71,7 +71,7 @@ R2TNet/
 ---
 
 
-## 🚀 Quick Start
+## Quick Start
 
 Train and evaluate on 4D fMRI, ROI series, or grayordinates — all from one CLI.
 
@@ -223,10 +223,3 @@ Output: CSV file with columns `subject_id,prediction`.
 | **AUROC = 0.5**     | Check for constant or missing labels           |
 | **Slow dataloader** | Increase `--num_workers`; pre-convert to `.pt` |
 
----
-
-## 🧠 Applications
-
-* Predict fluid intelligence, memory, personality from *resting scans only*
-* Shorten scan protocols in population studies
-* Transfer‑learn to clinical cohorts (ADNI, ABCD, UK Biobank)
