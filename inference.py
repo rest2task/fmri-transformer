@@ -57,6 +57,9 @@ def _predict_tensor(model: R2TNet, x: torch.Tensor, modality_id: int, device: to
     logit (apply sigmoid/softmax yourself if needed).
     """
     x = x.unsqueeze(0).to(device)          # add batch dim
+    if modality_id not in (0, 1):
+        raise ValueError("modality_id must be 0 (rest) or 1 (task)")
+
     mod = torch.tensor([modality_id], device=device)
 
     _, pred = model(x, mod)                # forward
@@ -71,17 +74,14 @@ def _predict_tensor(model: R2TNet, x: torch.Tensor, modality_id: int, device: to
 # ------------------------------------------------------------#
 # directory-level inference
 # ------------------------------------------------------------#
-def predict_folder(model: R2TNet, input_dir: str, device: torch.device):
+def predict_folder(model: R2TNet, input_dir: str, scan_type: str, device: torch.device):
     rows = []
     pt_files = sorted(glob.glob(os.path.join(input_dir, "*.pt")))
+    modality_id = 0 if scan_type == "rest" else 1
     for p in tqdm(pt_files, desc="inference"):
         x = torch.load(p, map_location="cpu")
 
-        if x.ndim == 5:                    # [C,H,W,D,T] volume
-            modality_id = 0
-        elif x.ndim == 2:                  # [V,T] ROI / grayord
-            modality_id = 1 if x.shape[0] < 91_282 else 2
-        else:
+        if x.ndim not in (5, 3, 2):
             raise ValueError(f"{p} has unexpected shape {tuple(x.shape)}")
 
         score = _predict_tensor(model, x, modality_id, device)
@@ -97,6 +97,7 @@ def main():
     ap.add_argument("--input_dir", required=True, help="Folder with *.pt tensors")
     ap.add_argument("--output", default="predictions.csv", help="CSV to write")
     ap.add_argument("--num_rois", type=int, default=0, help="Force ROI size if != 0")
+    ap.add_argument("--scan_type", choices=["rest", "task"], default="rest", help="Type of scan in input_dir")
     ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu",
                     help="cuda:N or cpu")
     args = ap.parse_args()
@@ -104,7 +105,7 @@ def main():
     device = torch.device(args.device)
     model = _instantiate_from_ckpt(args.ckpt, args.num_rois, device)
 
-    predictions = predict_folder(model, args.input_dir, device)
+    predictions = predict_folder(model, args.input_dir, args.scan_type, device)
 
     with open(args.output, "w", newline="") as fh:
         writer = csv.writer(fh)
